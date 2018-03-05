@@ -1,0 +1,190 @@
+from sklearn.feature_extraction.text import CountVectorizer
+from nltk.corpus import names
+from nltk.stem import WordNetLemmatizer
+
+import glob
+import os
+import numpy as np
+
+
+file_path = 'downloads/enron1/ham/0007.1999-12-14.farmer.ham.txt'
+with open(file_path, 'r') as infile:
+    ham_sample = infile.read()
+
+file_path = 'downloads/enron1/spam/0058.2003-12-21.GP.spam.txt'
+with open(file_path, 'r') as infile:
+    spam_sample = infile.read()
+
+cv = CountVectorizer(stop_words="english", max_features=500)
+
+emails, labels = [], []
+
+file_path = 'downloads/enron1/spam/'
+for filename in glob.glob(os.path.join(file_path, '*.txt')):
+    with open(filename, 'r', encoding = "ISO-8859-1") as infile:
+        emails.append(infile.read())
+        labels.append(1)
+
+file_path = 'downloads/enron1/ham/'
+for filename in glob.glob(os.path.join(file_path, '*.txt')):
+    with open(filename, 'r', encoding = "ISO-8859-1") as infile:
+        emails.append(infile.read())
+        labels.append(0)
+
+
+
+def letters_only(astr):
+    return astr.isalpha()
+
+
+all_names = set(names.words())
+lemmatizer = WordNetLemmatizer()
+
+
+def clean_text(docs):
+    cleaned_docs = []
+    for doc in docs:
+        cleaned_docs.append(' '.join([lemmatizer.lemmatize(word.lower())
+                                        for word in doc.split()
+                                        if letters_only(word)
+                                        and word not in all_names]))
+    return cleaned_docs
+
+
+cleaned_emails = clean_text(emails)
+term_docs = cv.fit_transform(cleaned_emails)
+
+feature_mapping = cv.vocabulary
+feature_names = cv.get_feature_names()
+
+def get_label_index(labels):
+    from collections import defaultdict
+    label_index = defaultdict(list)
+    for index, label in enumerate(labels):
+        label_index[label].append(index)
+    return label_index
+
+
+def get_prior(label_index):
+    """ Compute prior based on training samples
+    Args:
+        label_index (grouped sample indices by class)
+    Returns:
+        dictionary, with class label as key, corresponding prior as the value
+    """
+    prior = {label: len(index) for label, index in label_index.items()}
+    total_count = sum(prior.values())
+    for label in prior:
+        prior[label] /= float(total_count)
+    return prior
+
+
+def get_likelihood(term_document_matrix, label_index, smoothing=0):
+    """ Compute likelihood based on training samples
+    Args:
+        term_document_matrix (sparse matrix)
+        label_index (grouped sample indices by class)
+        smoothing (integer, additive Laplace smoothing parameter)
+    Returns:
+        dictionary, with class as key, corresponding conditional probability P(feature|class) vector as value
+    """
+    likelihood = {}
+    for label, index in label_index.items():
+        likelihood[label] = term_document_matrix[index, :].sum(axis=0) + smoothing
+        likelihood[label] = np.asarray(likelihood[label])[0]
+        total_count = likelihood[label].sum()
+        likelihood[label] = likelihood[label] / float(total_count)
+    return likelihood
+
+feature_names[:5]
+ 
+
+def get_posterior(term_document_matrix, prior, likelihood):
+    """ Compute posterior of testing samples, based on prior and likelihood
+    Args:
+        term_document_matrix (sparse matrix)
+        prior (dictionary, with class label as key, corresponding prior as the value)
+        likelihood (dictionary, with class label as key, corresponding conditional probability vector as value)
+    Returns:
+        dictionary, with class label as key, corresponding posterior as value
+    """
+    num_docs = term_document_matrix.shape[0]
+    posteriors = []
+    for i in range(num_docs):
+        # posterior is proportional to prior * likelihood
+        # = exp(log(prior * likelihood))
+        # = exp(log(prior) + log(likelihood))
+        posterior = {key: np.log(prior_label) for key, prior_label in prior.items()}
+        for label, likelihood_label in likelihood.items():
+            term_document_vector = term_document_matrix.getrow(i)
+            counts = term_document_vector.data
+            indices = term_document_vector.indices
+            for count, index in zip(counts, indices):
+                posterior[label] += np.log(likelihood_label[index]) * count
+        # exp(-1000):exp(-999) will cause zero division error,
+        # however it equates to exp(0):exp(1)
+        min_log_posterior = min(posterior.values())
+        for label in posterior:
+            try:
+                posterior[label] = np.exp(posterior[label] - min_log_posterior)
+            except:
+                # if one's log value is excessively large, assign it infinity
+                posterior[label] = float('inf')
+        # normalize so that all sums up to 1
+        sum_posterior = sum(posterior.values())
+        for label in posterior:
+            if posterior[label] == float('inf'):
+                posterior[label] = 1.0
+            else:
+                posterior[label] /= sum_posterior
+        posteriors.append(posterior.copy())
+    return posteriors
+
+
+label_index = get_label_index(labels)
+prior = get_prior(label_index)
+
+smoothing = 1
+likelihood = get_likelihood(term_docs, label_index, smoothing)
+
+
+
+emails_test = [
+    '''Subject: stacey automated system generating 8 k per week parallelogram
+    people are
+    getting rich using this system ! now it ' s your
+    turn !
+    we ' ve
+    cracked the code and will show you . . . .
+    this is the
+    only system that does everything for you , so you can make
+    money
+    . . . . . . . .
+    because your
+    success is . . . completely automated !
+    let me show
+    you how !
+    click
+    here
+    to opt out click here % random _ text
+    ''',
+    '''Subject : Regarding the details of the event
+    I along with my team are interested in coming to your companys event.
+    So we would like to know about the details of the event.
+    Kindly reply as soon as possible
+    Thank you
+    Rajesh''',
+    '''Subject : Regarding the venue of the event
+    Where is the event?
+    Thank you
+    Suyash''',
+    '''Subject : Regarding the venue of the event
+    What is it about?
+    Thank you
+    Suyash''',
+    ]
+
+cleaned_test = clean_text(emails_test)
+term_docs_test = cv.transform(cleaned_test)
+posterior = get_posterior(term_docs_test, prior, likelihood)
+print(posterior)
